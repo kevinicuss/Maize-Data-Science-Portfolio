@@ -1,0 +1,219 @@
+---
+title: "aa_data"
+author: "Kevin"
+date: "2024-03-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(hyperSpec)
+library(nnet)
+library(prospectr)
+library(mdatools)
+library(mvoutlier)
+library(purrr)
+library(tidyverse)
+library(lightr)
+library(plotly)
+library(cowplot)
+library(reshape2)
+library(stringr)
+library(lightr)
+library(caret) # for data preprocessing
+library(readr) # for data input/output
+library(RColorBrewer) # for color palettes
+library(zoo)# allows us to fill NA
+library(dplyr)
+library(tidyr)
+```
+
+First This section will arrange and prepare single seed hyperspectraldata
+```{r}
+
+# Read the raw AA data from a CSV file
+data_aa <- read.csv("/Users/propst/Desktop/xlsx/alpha_amylase_073024.csv", header = TRUE)
+
+data_aa <- data_aa %>%
+  mutate(
+    MN.ID = na_if(MN.ID, ""),
+    Stdev = na_if(Stdev, "")
+  )
+
+
+data_aa <- data_aa %>%
+  fill(MN.ID, Treatment..Hours., Lab.ID, Mean, Stdev, .direction = "down")
+
+
+
+# Step 2: Remove rows with any NA values
+data_aa <- data_aa %>%
+  mutate(Sample.ID = "conrad")%>%
+  filter(Tech..Rep == "1")%>%
+  na.omit()
+
+```
+
+
+```{r}
+data_aa <- data_aa %>%
+  rename(genotype = Sample.ID,
+         timepoint = Treatment..Hours.)%>%
+  #dplyr::filter(Tech..Rep == 1) %>%
+  na.omit()
+
+aa_df <- data_aa %>%
+  separate(MN.ID, into = c("part1", "part2", "seed_num","rep"), sep = "-", remove = TRUE, fill = "right") %>%
+  dplyr::select(-part1, -part2)
+
+aa_df <- aa_df %>%
+  separate(seed_num, into = c("seed_num", "rep"), sep = "(?<=\\d)(?=\\D)", convert = TRUE)
+aa_df$rep <- tolower(aa_df$rep)
+
+aa_df$rep[is.na(aa_df$rep)] <- "1"
+
+aa_df <- aa_df %>%
+  mutate(timepoint = ifelse(timepoint == 16, 24, timepoint))
+# Remove intermediate parts after splitting
+# Step 3: Rename columns for standardization and filter data
+# Note: The renaming of 'MN.ID' to 'seed_num' here might be revisited based on the previous mutation steps
+
+
+
+
+aa_df <- aa_df[!duplicated(names(aa_df))]
+aa_df <- aa_df %>% dplyr::select(-Stdev)
+
+
+aa_df
+
+aa_df_0 <-aa_df%>%
+  dplyr::filter(timepoint == 0)
+aa_df_14 <-aa_df%>%
+  dplyr::filter(timepoint == 14)
+
+aa_df_18 <-aa_df%>%
+  dplyr::filter(timepoint == 18)
+
+aa_df_24 <- aa_df%>%
+  dplyr::filter(timepoint == 24)
+
+aa_df_32 <- aa_df%>%
+  dplyr::filter(timepoint == 32)
+
+dec_aa <- aa_df%>%
+  dplyr::filter(grepl("^12|1", Date.Extracted))
+
+feb_aa <- aa_df%>%
+  dplyr::filter(grepl("^2|3", Date.Extracted))
+
+june_aa <- aa_df%>%
+  dplyr::filter(grepl("^7", Date.Extracted))
+```
+
+
+This section will arrange the alpha amylase data from UW
+```{r pressure, echo=FALSE}
+
+# ---------------------
+# Read in Hyperspec Data
+# ---------------------
+data_june_24 <- read.csv("/Users/propst/Desktop/using_wide.csv_output/kp_seed_normalized_june_2024.csv", header = TRUE)
+data_june_24
+
+```
+
+```{r}
+# ---------------------
+# Data Preprocessing
+# ---------------------
+
+# Reorder Columns to Move 'seed_id' to the 7th Position
+column_names <- names(data_june_24)
+column_names <- column_names[column_names != "seed_id"]
+new_order <- c(column_names[1:6], "seed_id", column_names[7:length(column_names)])
+
+# Rename Columns: Remove 'X' prefix and convert wavelengths to numeric
+colnames(data_june_24) <- sub("^X", "", colnames(data_june_24))
+
+```
+
+```{r}
+# ---------------------
+# Data Segmentation
+# ---------------------
+
+# Segment Data into Individual Seeds and Bulk Data
+single_seed_data <- data_june_24 %>%
+  dplyr::filter(as.numeric(seed_num) > 0 & as.numeric(seed_num) < 49,
+           genotype == "conrad")
+
+
+data_bulk <- data_june_24 %>%
+  dplyr::filter(as.numeric(seed_num) > 48)
+
+# Check unique genotypes and timepoints
+# unique(single_seed_data$genotype)
+# unique(data_bulk$timepoint)
+
+# ---------------------
+# Data Integration and Transformation
+# ---------------------
+
+# Combine Hyperspec data with another dataset (e.g., AA data) on common columns
+# Ensure aa_df is previously prepared and available
+# 
+#aa_df <- aa_df%>%
+#  dplyr::select(-Date.Extracted, -Tech..Rep)
+#
+single_seed_aa_combined<-""
+single_seed_aa_combined <- merge(june_aa, single_seed_data, by = c("seed_num","timepoint", "genotype"))
+
+
+
+# Transform Combined Data to Long Format for Analysis
+single_seed_aa_combined<- single_seed_aa_combined%>%
+  dplyr::select(-c(Lab.ID,Tech..Rep, X, AA.U.g,rep.x))
+
+single_seed_long <- pivot_longer(single_seed_aa_combined, 
+                                 cols = c(9:ncol(single_seed_aa_combined)),
+                                 names_to = "Wavelength",
+                                 values_to = "Reflectance")
+
+```
+
+
+
+
+
+
+
+
+
+```{r}
+single_seed_aa_combined
+
+write.csv(single_seed_aa_combined, file = "/Users/propst/Desktop/using_wide.csv_output/june2024_spectral_aa_combined_data.csv", row.names = FALSE)
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+library(dplyr)
+
+# Define the file paths
+file_paths <- c(
+  "/Users/propst/Desktop/using_wide.csv_output/dec2024_spectral_aa_combined_data.csv",
+  "/Users/propst/Desktop/using_wide.csv_output/june2024_spectral_aa_combined_data.csv",
+  "/Users/propst/Desktop/using_wide.csv_output/feb2024_spectral_aa_combined_data.csv"
+)
+
+# Read and combine all CSV files
+combined_data <- file_paths %>%
+  lapply(read.csv) %>%
+  bind_rows()
+
+# Write the combined data to a new CSV file
+write.csv(combined_data, "/Users/propst/Desktop/using_wide.csv_output/full_combined_spectral_aa_data_0525.csv", row.names = FALSE)
+
+```

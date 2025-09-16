@@ -1,0 +1,275 @@
+---
+title: "training_data_renewed"
+author: "Kevin"
+date: "2025-02-23"
+output: html_document
+---
+
+In this RMD file I will optimize my preprocessing of my  data for prediction of alpha-amylase content using spectral data.
+
+Table Of Contents
+
+1) Data Import and organization
+2.) Noise Reduction 
+3.) Data Transformation and Normalization
+4.) Feature Extraction
+5.) Data Augmentation and combination
+6.) Final formatting
+
+```{r}
+# Import libraries
+
+#Data Manipulation
+library(dplyr) # Data manipulation
+library(tidyr) # helps tidy Data
+library(readr) # for data input/output
+library(stringr) # Great for string manipulation
+library(purrr) # supports working with vectors and lists
+library(reshape2) # Data reshaping
+library(tidyverse)
+
+# Data Visualization packages
+library(ggplot2)
+library(plotly)
+library(cowplot)
+library(RColorBrewer) # for color palettes
+
+#Spectral Analysis 
+library(hyperSpec) # process, analyze, visualize hyperspec data
+library(prospectr) # can be used for its preprocessing functions
+library(signal) # Used for Savitzy-Golay 
+library(mdatools) # Multivariate data analysis
+library(mvoutlier) # outlier detection
+library(lightr)
+library(baseline) # Used for Baseline correction
+
+
+#Machine Learning and Modeling
+library(nnet)
+library(caret)
+
+#Timeseries
+library(zoo) # allows us to fill NA
+```
+
+
+1.) Import and organization
+```{r}
+# Read the raw AA data from a CSV file. Also Try to use this for adding any new training data.
+data_april_25 <- read.csv("/Users/propst/Desktop/using/april_25_seed_spectral_data.csv", header = TRUE)
+
+```
+
+
+```{r}
+
+# Remove X from in front of wavelength.
+colnames(data) <- sub("^X", "", colnames(data))
+
+# Individual seed. Also make sure that it in the germination stage.
+
+# Change wavelength to numeric 
+data_july <- na.omit(data)
+
+# Individual seed
+data_individual <- data_july%>%
+ dplyr::filter(as.numeric(seed_num) >0 & as.numeric(seed_num) < 49,
+        side == "v",
+        stage == "g")
+#Remove .raw from date column.
+data_individual$date <- gsub("\\.raw", "", data_individual$date)
+
+```
+2.) Baseline Correction 
+```{r}
+
+# 1. Identify spectral columns
+spectral_cols <- grep("^[0-9]+\\.[0-9]+$", names(data_individual), value = TRUE)
+
+# 2. Extract spectral data and convert to matrix
+spec_matrix <- data_individual %>%
+  select(all_of(spectral_cols)) %>%
+  as.matrix()
+
+# 3. Apply baseline correction using the ALS method
+bl_result <- baseline.als(spec_matrix, lambda = 50, p = 0.1)
+
+# 4. Extract the corrected spectra from the result
+corrected_spec <- bl_result$corrected
+
+# 5. Combine the corrected spectral data back with the original metadata
+data_individual_corrected <- data_individual %>%
+  select(-all_of(spectral_cols)) %>%       # Remove original spectral columns
+  bind_cols(as.data.frame(corrected_spec))   # Bind corrected spectra
+
+# Optional: inspect the corrected data
+head(data_individual_corrected)
+
+
+
+# Reshape the corrected data from wide to long format
+df_plot <- data_individual_corrected %>%
+  pivot_longer(
+    cols = matches("^[0-9]+\\.[0-9]+$"),  # select columns with wavelength names
+    names_to = "wavelength",
+    values_to = "reflectance"
+  ) %>%
+  mutate(wavelength = as.numeric(wavelength))
+
+df_plot <- df_plot %>%
+  dplyr::filter(wavelength > 420)
+# Create the plot: facet by timepoint
+ggplot(df_plot, aes(x = wavelength, y = reflectance, group = seed_num, color = genotype)) +
+  geom_line(alpha = 0.7) +
+  facet_wrap(~ timepoint, scales = "free_y") +
+  labs(title = "Baseline Corrected Spectra by Timepoint",
+       x = "Wavelength (nm)",
+       y = "Corrected Reflectance") +
+  theme_minimal()
+```
+3.) Noise reduction
+
+
+```{r pressure, echo=FALSE}
+
+# Apply Savitzky-Golay Filter
+df_long_golay <- df_plot %>%
+  group_by(side, stage, date, timepoint, genotype, seed_num) %>%
+  arrange(wavelength) %>%  # Ensure wavelengths are in increasing order
+  mutate(smoothed_reflectance = sgolayfilt(reflectance, p = 2, n = 11)) %>% 
+  ungroup()
+
+head(df_long_golay)
+
+# Create a comparison plot with raw and smoothed reflectance
+ggplot(df_long_golay, aes(x = wavelength)) +
+  geom_line(aes(y = reflectance, color = "Raw"), size = 1, linetype = "dashed") +
+  geom_line(aes(y = smoothed_reflectance, color = "Smoothed"), size = 1) +
+  labs(title = "Comparison of Raw vs. Savitzky-Golay Smoothed Spectra",
+       x = "Wavelength",
+       y = "Reflectance",
+       color = "Data Type") +
+  theme_minimal()
+```
+4.) Data Tranformation
+```{r}
+library(signal)
+
+# 1) Frist Derivative
+df_long_deriv <- df_long_golay %>%
+  group_by(side, stage, date, timepoint, genotype, seed_num) %>%
+  arrange(wavelength) %>%  
+  # Compute first derivative of the smoothed reflectance
+  mutate(first_derivative = sgolayfilt(smoothed_reflectance, p = 2, n = 11, m = 1)) %>%
+  ungroup()
+
+# Inspect a portion of the transformed data
+head(df_long_deriv)
+
+# 2.) Standard Normal Variate (SNV)
+df_long_snv <- df_long_golay %>%
+  group_by(side, stage, date, timepoint, genotype, seed_num) %>%
+  arrange(wavelength) %>%
+  # Compute SNV for each spectrum within each group
+  mutate(snv_reflectance = (smoothed_reflectance - mean(smoothed_reflectance)) / sd(smoothed_reflectance)) %>%
+  ungroup()
+
+# Inspect a portion of the SNV-transformed data
+head(df_long_snv)
+
+# Assume 'spectral_cols' contains the names of the spectral columns, and
+# data_individual_corrected is your data frame with baseline‐corrected and smoothed spectra
+
+# Extract spectral data matrix:
+spec_matrix <- df_long_snv %>%
+  select(all_of(spectral_cols)) %>%
+  as.matrix()
+
+# Create a numeric vector of wavelengths from your column names:
+wavelength <- as.numeric(spectral_cols)
+spec_msc <- msc(spec_matrix)
+
+library(ggplot2)
+
+# Choose a sample index to inspect (e.g., first spectrum)
+spec_index <- 1
+
+# Create a data frame for plotting
+df_plot <- data.frame(
+  wavelength = wavelength,
+  original = spec_matrix[spec_index, ],
+  msc_corrected = spec_msc[spec_index, ]
+)
+
+# Plot the original and MSC-corrected spectra
+ggplot(df_plot, aes(x = wavelength)) +
+  geom_line(aes(y = original, color = "Original")) +
+  geom_line(aes(y = msc_corrected, color = "MSC Corrected")) +
+  labs(title = "Spectrum Comparison",
+       x = "Wavelength",
+       y = "Reflectance") +
+  scale_color_manual(values = c("Original" = "black", "MSC Corrected" = "red"))
+
+```
+
+3.) Normalization
+
+```{r}
+
+# Create Normalization function
+min_max_normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+
+# Apply function to filtered data
+df_long_normal <- df_long_deriv %>%
+  group_by(timepoint) %>%
+  mutate(norm_reflectance = min_max_normalize(reflectance))
+
+df_long_normalized_smooth <- df_long_deriv %>%
+  group_by(timepoint) %>%
+  mutate(norm_reflectance_smooth = min_max_normalize(smoothed_reflectance))
+
+df_long_normalized_deriv <- df_long_deriv %>%
+  group_by(timepoint) %>%
+  mutate(norm_reflectance_deriv = min_max_normalize(first_derivative))
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Plot 1: Normalized Raw Reflectance
+p1 <- ggplot(df_long_normal, aes(x = wavelength, y = norm_reflectance)) +
+  geom_line(color = "blue") +
+  labs(title = "Min-Max Normalized Raw Reflectance",
+       x = "Wavelength", y = "Normalized Reflectance") +
+  facet_wrap(~ timepoint, scales = "free_y") +
+  theme_minimal()
+
+# Plot 2: Normalized Smoothed Reflectance
+p2 <- ggplot(df_long_normalized_smooth, aes(x = wavelength, y = norm_reflectance_smooth)) +
+  geom_line(color = "darkgreen") +
+  labs(title = "Min-Max Normalized Smoothed Reflectance",
+       x = "Wavelength", y = "Normalized Smoothed Reflectance") +
+  facet_wrap(~ timepoint, scales = "free_y") +
+  theme_minimal()
+
+# Plot 3: Normalized First Derivative
+
+df_long_normalized_deriv <- df_long_normalized_deriv%>%
+  dplyr::filter(wavelength >450 & wavelength <1000)
+p3 <- ggplot(df_long_normalized_deriv, aes(x = wavelength, y = norm_reflectance_deriv)) +
+  geom_line(color = "red") +
+  labs(title = "Min-Max Normalized First Derivative",
+       x = "Wavelength", y = "Normalized First Derivative") +
+  facet_wrap(~ timepoint, scales = "free_y") +
+  theme_minimal()
+
+p1
+p2
+p3
+```
+
+
+

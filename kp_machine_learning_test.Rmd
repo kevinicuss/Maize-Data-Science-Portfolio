@@ -1,0 +1,204 @@
+---
+title: "kp_machine_learning"
+author: "Kevin"
+date: "2025-04-14"
+output: pdf_document
+---
+
+```{verbatim}
+# Kevin Propst 
+# Machine Learning and AI intern candidate
+# Machine learning model for image classification.
+##########
+
+import os
+import numpy as np
+from PIL import Image
+import tensorflow as tf
+
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import classification_report
+
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Dense, Dropout, Concatenate
+from tensorflow.keras.applications import MobileNetV2
+
+##########
+
+# # This section of the code takes your image and OCR directory and defines how it's presented to the model.
+# In this case, we are specifying the image size, the number of features to extract from the OCR file, 
+# and importing the image into a binary color scheme (grayscale).
+
+def load_image_text_data(img_dir, ocr_dir, img_size=(128, 128), max_features=500, grayscale=True):
+    img_data = []
+    txt_data = [] #  # We create empty lists for parsing the different data
+    labels = []
+
+    class_dir = sorted(os.listdir(img_dir))
+
+    for class_value in class_dir:
+        if not os.path.isdir(os.path.join(img_dir, class_value)):
+            continue  # Skip non-folder items
+
+        img_class_dir = os.path.join(img_dir, class_value)
+        ocr_class_dir = os.path.join(ocr_dir, class_value)
+
+        for file in os.listdir(img_class_dir):
+            if not file.lower().endswith('.tif'):
+                continue
+
+            # Load and preprocess image
+            img_path = os.path.join(img_class_dir, file)
+            with Image.open(img_path) as img:
+                if grayscale:
+                    img = img.convert("L")
+                    arr = np.expand_dims(np.array(img.resize(img_size)), axis=-1)
+                else:
+                    img = img.convert("RGB")
+                    arr = np.array(img.resize(img_size))
+                img_data.append(arr / 255.0)
+
+            # Load matching OCR text
+            ocr_path = os.path.join(ocr_class_dir, file + '.txt')
+            if os.path.exists(ocr_path):
+                with open(ocr_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    txt_data.append(f.read())
+            else:
+                txt_data.append("")
+
+            labels.append(class_value)
+
+    img_data = np.array(img_data)
+
+    # Filter out blank OCR entries
+    filtered_images, filtered_texts, filtered_labels = [], [], []
+    for img, text, label in zip(img_data, txt_data, labels):
+        if text.strip():
+            filtered_images.append(img)
+            filtered_texts.append(text)
+            filtered_labels.append(label)
+
+    img_data = np.array(filtered_images)
+    txt_data = filtered_texts
+    labels = filtered_labels
+
+    # Encode text features
+    vectorizer = TfidfVectorizer(max_features=max_features, stop_words='english')
+    txt_vectors = vectorizer.fit_transform(txt_data).toarray()
+
+    # Encode class labels
+    label_encoder = LabelEncoder()
+    y_encoded = label_encoder.fit_transform(labels)
+    y_cat = to_categorical(y_encoded)
+
+    # Split into training and validation sets
+    X_img_train, X_img_val, X_txt_train, X_txt_val, y_train, y_val = train_test_split(
+        img_data, txt_vectors, y_cat, test_size=0.2, stratify=y_cat, random_state=42
+    )
+
+    return (X_img_train, X_txt_train, y_train), (X_img_val, X_txt_val, y_val), vectorizer, label_encoder
+
+##########
+
+# This section constructs the model for image classification, We will load in the image files, divide it into training and validation data
+# create the achitecture of the model, combine our image and text features, and then impliment training based on our set parameters.
+# at the end we will gnerate a classification report to determine accuracy.
+
+# File paths
+img_dir = "/Users/propst/Downloads/MachineLearningEngineerTest/ML/data/images"
+ocr_dir = "/Users/propst/Downloads/MachineLearningEngineerTest/ML/data/ocr"
+
+# Load data
+(X_img_train, X_txt_train, y_train), (X_img_val, X_txt_val, y_val), tfidf, label_enc = load_image_text_data(
+    img_dir=img_dir,
+    ocr_dir=ocr_dir,
+    img_size=(128, 128),
+    max_features=500,
+    grayscale=True
+)
+
+# Define model architecture
+img_input = Input(shape=(128, 128, 1), name='img_input')
+txt_input = Input(shape=(X_txt_train.shape[1],), name='text_input')
+
+x = tf.keras.layers.Conv2D(32, (3, 3), activation='relu')(img_input)
+x = tf.keras.layers.MaxPooling2D((2, 2))(x)
+x = tf.keras.layers.Conv2D(64, (3, 3), activation='relu')(x)
+x = tf.keras.layers.MaxPooling2D((2, 2))(x)
+x = tf.keras.layers.Flatten()(x)
+
+combined = Concatenate()([x, txt_input])
+x = Dense(128, activation='relu')(combined)
+x = Dropout(0.3)(x)
+output = Dense(y_train.shape[1], activation='softmax')(x)
+
+model = Model(inputs=[img_input, txt_input], outputs=output)
+model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+# Train model
+model.fit(
+    [X_img_train, X_txt_train],
+    y_train,
+    validation_data=([X_img_val, X_txt_val], y_val),
+    epochs=10,
+    batch_size=32
+)
+
+# Evaluate model on validation set
+y_pred = model.predict([X_img_val, X_txt_val])
+y_pred_labels = np.argmax(y_pred, axis=1)
+y_true_labels = np.argmax(y_val, axis=1)
+
+from sklearn.metrics import classification_report, accuracy_score
+
+# Print full classification report
+print("\nClassification Report:")
+print(classification_report(y_true_labels, y_pred_labels, target_names=label_enc.classes_))
+
+# Print overall accuracy
+accuracy = accuracy_score(y_true_labels, y_pred_labels)
+print(f"\nValidation Accuracy: {accuracy:.4f}")
+
+
+print(classification_report(y_true_labels, y_pred_labels, target_names=label_enc.classes_))
+
+# Save the trained model
+model.save("tif_ocr_classifier.h5")
+
+
+
+```
+
+```{verbatim}
+Classification Report:
+              precision    recall  f1-score   support
+
+           0       0.87      0.82      0.85       100
+           2       0.95      0.94      0.94       100
+           4       0.77      0.77      0.77        90
+           6       0.73      0.83      0.78        99
+           9       0.73      0.69      0.71       100
+
+    accuracy                           0.81       489
+   macro avg       0.81      0.81      0.81       489
+weighted avg       0.81      0.81      0.81       489
+
+
+Validation Accuracy: 0.8098
+              precision    recall  f1-score   support
+
+           0       0.87      0.82      0.85       100
+           2       0.95      0.94      0.94       100
+           4       0.77      0.77      0.77        90
+           6       0.73      0.83      0.78        99
+           9       0.73      0.69      0.71       100
+
+    accuracy                           0.81       489
+   macro avg       0.81      0.81      0.81       489
+weighted avg       0.81      0.81      0.81       489
+
+
+```

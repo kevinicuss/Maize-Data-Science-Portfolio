@@ -1,0 +1,237 @@
+---
+title: "full_preprocessed_pipeline_0525"
+author: "Kevin"
+date: "2025-05-15"
+output: pdf_document
+---
+```{r}
+
+# ---- Load Required Libraries ----
+library(dplyr)
+library(tidyr)
+library(baseline)
+library(signal)
+library(ggplot2)
+library(stringr)
+library(tools)
+
+# ---- Preprocessing Function ----
+preprocess_seed_data <- function(file_path, plot = FALSE, save_output = TRUE) {
+  min_max_normalize <- function(x) {
+    (x - min(x)) / (max(x) - min(x))
+  }
+
+  data <- read.csv(file_path, header = TRUE)
+  colnames(data) <- sub("^X", "", colnames(data))
+  data <- na.omit(data)
+
+  # ---- Ensure 'rep' Column Exists ----
+  if (!"rep" %in% colnames(data)) {
+    data$rep <- "a"
+  } else {
+    data$rep <- as.character(data$rep)
+  }
+
+  if ("seed_num" %in% colnames(data)) {
+    data <- data %>%
+      dplyr::filter(!is.na(suppressWarnings(as.numeric(seed_num)))) %>%
+      dplyr::mutate(seed_num = as.numeric(seed_num)) %>%
+      dplyr::filter(seed_num > 0 & seed_num < 49)
+  }
+
+  if ("date" %in% colnames(data)) {
+    data$date <- gsub("\\.raw", "", data$date)
+  }
+
+  spectral_cols <- colnames(data)[suppressWarnings(as.numeric(colnames(data))) > 390]
+  spectral_cols <- spectral_cols[!is.na(spectral_cols)]
+
+  if (length(spectral_cols) == 0) {
+    stop("❌ No valid spectral columns found in file: ", basename(file_path))
+  }
+
+  message("🧪 Found ", length(spectral_cols), " spectral columns.")
+  message("Example wavelengths: ", paste(head(spectral_cols, 5), collapse = ", "))
+
+  spec_matrix <- data %>% dplyr::select(all_of(spectral_cols)) %>% as.matrix()
+  bl_result <- baseline.als(spec_matrix, lambda = 50, p = 0.1)
+  corrected_spec <- bl_result$corrected
+
+  data_corrected <- data %>%
+    dplyr::select(-all_of(spectral_cols)) %>%
+    bind_cols(as.data.frame(corrected_spec))
+  colnames(data_corrected)[(ncol(data_corrected) - length(spectral_cols) + 1):ncol(data_corrected)] <- spectral_cols
+
+  df_long <- data_corrected %>%
+    pivot_longer(cols = all_of(spectral_cols), names_to = "wavelength", values_to = "reflectance") %>%
+    mutate(wavelength = as.numeric(wavelength)) %>%
+    dplyr::filter(wavelength > 450 & wavelength < 1000)
+
+  df_long <- df_long %>%
+    group_by(stage, side, seed_num, genotype, date, timepoint) %>%
+    arrange(wavelength) %>%
+    mutate(
+      smoothed_reflectance = sgolayfilt(reflectance, p = 2, n = 11),
+      first_derivative = sgolayfilt(smoothed_reflectance, p = 2, n = 11, m = 1)
+    ) %>%
+    ungroup() %>%
+    group_by(stage, side) %>%
+    mutate(
+      norm_reflectance = min_max_normalize(reflectance),
+      norm_reflectance_smooth = min_max_normalize(smoothed_reflectance),
+      norm_reflectance_deriv = min_max_normalize(first_derivative)
+    ) %>%
+    ungroup()
+
+
+  # ---- Plotting ----
+  if (plot) {
+    file_tag <- tools::file_path_sans_ext(basename(file_path))
+
+    # Clean up facet labels
+    df_long <- df_long %>%
+  mutate(
+    stage = as.character(stage),
+    side = as.character(side),
+    stage = recode(stage, g = "Germination", m = "Malt", .default = stage),
+    side = recode(side, d = "Dorsal", v = "Ventral", .default = side)
+  )
+
+    # Helper function: plot mean ± SD ribbons
+    plot_ribbon <- function(data, yvar, title_suffix, ylab, file_suffix) {
+      ggplot(
+        data %>%
+          dplyr::group_by(wavelength, stage, side) %>%
+          dplyr::summarise(
+            mean_val = mean(.data[[yvar]], na.rm = TRUE),
+            sd_val = sd(.data[[yvar]], na.rm = TRUE),
+            .groups = "drop"
+          ),
+        aes(x = wavelength, y = mean_val)
+      ) +
+        geom_ribbon(aes(ymin = mean_val - sd_val, ymax = mean_val + sd_val),
+                    fill = "red", alpha = 0.3) +
+        geom_line(color = "black", linewidth = 0.4) +
+        facet_wrap(~ stage + side) +
+        labs(
+          title = paste(title_suffix, "-", file_tag),
+          x = "Wavelength (nm)",
+          y = ylab
+        ) +
+        theme_minimal() +
+        theme(legend.position = "none") -> p
+
+      ggsave(paste0(file_tag, file_suffix), p, width = 10, height = 5)
+    }
+
+    # Generate plots
+    plot_ribbon(df_long, "reflectance", "Raw Reflectance", "Reflectance", "_plot_raw.png")
+    plot_ribbon(df_long, "norm_reflectance", "Normalized Reflectance", "Normalized Reflectance", "_plot_norm_reflectance.png")
+    plot_ribbon(df_long, "norm_reflectance_smooth", "Smoothed Reflectance", "Normalized Smoothed", "_plot_norm_smooth.png")
+    plot_ribbon(df_long, "norm_reflectance_deriv", "First Derivative", "Normalized Derivative", "_plot_norm_derivative.png")
+
+    message("📊 Saved 4 mean ± SD plots with expanded labels for: ", file_tag)
+  }
+
+  # ---- Save Wide Format CSV ----
+  if (save_output) {
+    if (!str_detect(file_path, "raw")) {
+      output_wide <- str_replace(file_path, ".csv", "_normalized_wide.csv")
+    } else {
+      output_wide <- str_replace(file_path, "raw", "normalized") %>%
+        str_replace(".csv", "_wide.csv")
+    }
+
+    output_dir <- dirname(output_wide)
+    if (!dir.exists(output_dir)) {
+      dir.create(output_dir, recursive = TRUE)
+      message("📁 Created output directory: ", output_dir)
+    }
+
+    df_wide <- df_long %>%
+      dplyr::select(seed_num, genotype, stage, side, timepoint, rep, wavelength, norm_reflectance_deriv) %>%
+      dplyr::group_by(seed_num, genotype, stage, side, timepoint, rep, wavelength) %>%
+      dplyr::summarise(norm_reflectance_deriv = mean(norm_reflectance_deriv, na.rm = TRUE), .groups = "drop") %>%
+      pivot_wider(names_from = wavelength, values_from = norm_reflectance_deriv) %>%
+      dplyr::arrange(seed_num)
+
+    message("💾 Writing wide-format to: ", output_wide)
+    tryCatch({
+      write.csv(df_wide, output_wide, row.names = FALSE)
+    }, error = function(e) {
+      message("❌ Failed to write wide-format file: ", e$message)
+    })
+  }
+
+  return(list(long = df_long, wide = df_wide))
+}
+
+```
+
+```{r}
+# Define your file paths
+file_paths <- list(
+  #march_25 = "/Users/propst/Desktop/using/csv_output/seed_spectral_data.csv",
+  june_24 = "/Users/propst/Desktop/using/csv_output/kp_seed_raw_june_2024.csv",
+  feb_25 = "/Users/propst/Desktop/using/csv_output/kp_seed_raw_feb_2025.csv",
+  dec_24 = "/Users/propst/Desktop/using/csv_output/kp_seed_raw_dec_2024.csv",
+  may_2025 = "/Users/propst/Desktop/using/csv_output/kp_seed_raw_may_2025.csv",
+  feb_24 = "/Users/propst/Desktop/using/csv_output/kp_seed_raw_feb_2024.csv"
+)
+
+```
+
+```{r}
+# Safe wrapper to avoid reprocessing files
+safe_preprocess <- function(file_path) {
+  if (!str_detect(file_path, "raw")) {
+    output_wide <- str_replace(file_path, ".csv", "_normalized_wide.csv")
+    expected_plots <- c(
+      str_replace(file_path, ".csv", "_plot_raw.png"),
+      str_replace(file_path, ".csv", "_plot_norm_reflectance.png"),
+      str_replace(file_path, ".csv", "_plot_norm_smooth.png"),
+      str_replace(file_path, ".csv", "_plot_norm_derivative.png")
+    )
+  } else {
+    output_wide <- str_replace(file_path, "raw", "normalized") %>%
+      str_replace(".csv", "_wide.csv")
+    tag <- tools::file_path_sans_ext(basename(file_path))
+    expected_plots <- paste0(tag, c("_plot_raw.png", "_plot_norm_reflectance.png", "_plot_norm_smooth.png", "_plot_norm_derivative.png"))
+  }
+
+  # Skip if wide file and all plots exist
+  if (file.exists(output_wide) && all(file.exists(expected_plots))) {
+    message("✅ Skipping (already processed): ", basename(file_path))
+    return(NULL)
+  }
+
+  message("⚙️ Processing: ", basename(file_path))
+  result <- preprocess_seed_data(file_path = file_path, plot = TRUE, save_output = TRUE)
+  message("✅ Done: ", basename(file_path))
+  return(result)
+}
+
+```
+
+```{r}
+
+# ---- Run Batch ----
+all_processed <- list()
+for (name in names(file_paths)) {
+  path <- file_paths[[name]]
+  result <- safe_preprocess(path)
+  all_processed[[name]] <- result
+}
+```
+
+```{4}
+feb <- read.csv("/Users/propst/Desktop/using/csv_output/kp_seed_raw_feb_022024.csv", header = TRUE )
+
+data <- feb %>%
+  mutate(temp = date,        # temporarily store 'date'
+         date = as.character(side),  # move 'side' into 'date' (as character)
+         side = temp) %>%    # restore 'date' into 'side'
+  select(-temp) 
+```
+write.csv(data, "/Users/propst/Desktop/using/csv_output/kp_seed_raw_feb_2024.csv", row.names = FALSE)
+```

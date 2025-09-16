@@ -1,0 +1,434 @@
+---
+title: "spectra_comparison_two_cameras"
+author: "Kevin"
+date: "2025-04-01"
+output: html_document
+---
+```{r, include=FALSE}
+library(ggplot2)
+library(hyperSpec)
+library(nnet)
+library(prospectr)
+library(mdatools)
+library(mvoutlier)
+library(purrr)
+library(tidyverse)
+library(lightr)
+library(plotly)
+library(cowplot)
+library(reshape2)
+library(stringr)
+library(lightr)
+library(caret) # for data preprocessing
+library(readr) # for data input/output
+library(RColorBrewer) # for color palettes
+library(zoo)# allows us to fill NA
+library(dplyr)
+library(tidyr)
+```
+```{r, include=FALSE}
+# --- Preprocessing Function ---
+preprocess_spectra <- function(data, dataset_label){
+
+  data <- data %>%
+    mutate(rep = "a") %>%
+    select(1:2, rep, everything())
+
+  colnames(data) <- sub("^X", "", colnames(data))
+
+  data_individual <- na.omit(data) %>%
+    dplyr::filter(as.numeric(seed_num) > 0 & as.numeric(seed_num) < 49)
+
+  data_individual$date <- gsub("\\.raw", "", data_individual$date)
+
+  # Identify spectral columns
+  spectral_cols <- grep("^[0-9]+\\.[0-9]+$", names(data_individual), value = TRUE)
+
+  # Baseline Correction
+  spec_matrix <- data_individual %>% dplyr::select(all_of(spectral_cols)) %>% as.matrix()
+  bl_result <- baseline.als(spec_matrix, lambda = 50, p = 0.1)
+  corrected_spec <- bl_result$corrected
+
+  data_corrected <- data_individual %>%
+    dplyr::select(-all_of(spectral_cols)) %>%
+    bind_cols(as.data.frame(corrected_spec))
+
+  # Re-extract spectral columns
+  spectral_cols <- grep("^[0-9]+\\.[0-9]+$", names(data_corrected), value = TRUE)
+
+  # Long format
+  df_long <- data_corrected %>%
+    pivot_longer(cols = spectral_cols, names_to = "wavelength", values_to = "reflectance") %>%
+    mutate(wavelength = as.numeric(wavelength))
+
+  # MSC Correction
+  spec_matrix <- data_corrected %>% select(all_of(spectral_cols)) %>% as.matrix()
+  spec_msc <- msc(spec_matrix)
+  msc_df <- as.data.frame(spec_msc)
+  colnames(msc_df) <- spectral_cols
+
+  msc_df <- data_corrected %>%
+    select(-all_of(spectral_cols)) %>%
+    bind_cols(msc_df) %>%
+    pivot_longer(cols = spectral_cols, names_to = "wavelength", values_to = "MSC_Reflectance") %>%
+    mutate(wavelength = as.numeric(wavelength))
+
+  df_long <- df_long %>%
+    left_join(msc_df, by = c("rep", "side", "stage", "date", "timepoint", "genotype", "seed_num", "wavelength"))
+
+  # Savitzky-Golay Smoothing
+  df_long <- df_long %>%
+    group_by(side, stage, date, timepoint, genotype, seed_num) %>%
+    arrange(wavelength) %>%
+    mutate(
+      smoothed_reflectance = sgolayfilt(reflectance, p = 2, n = 11),
+      smoothed_msc_reflectance = sgolayfilt(MSC_Reflectance, p = 2, n = 11),
+      first_derivative = sgolayfilt(smoothed_msc_reflectance, p = 2, n = 11, m = 1)
+    ) %>%
+    ungroup()
+
+  # Normalization
+  min_max_normalize <- function(x) { (x - min(x)) / (max(x) - min(x)) }
+
+  df_long <- df_long %>%
+    group_by(timepoint) %>%
+    mutate(norm_reflectance_deriv = min_max_normalize(first_derivative)) %>%
+    ungroup()
+
+  # Dataset label
+  #df_long$dataset <- dataset_label
+
+  return(df_long)
+}
+```
+
+
+
+```{r}
+# --- Load Data ---
+data_feb_july <- read.csv("/Users/propst/Desktop/kp_barley_project_folders/feb_july_data.csv")
+data_feb_march <- read.csv("/Users/propst/Desktop/using/seed_spectral_data.csv")
+```
+
+```{r}
+# --- Apply Preprocessing ---
+df_feb_july <- preprocess_spectra(data_feb_july, "feb_july")
+df_feb_march <- preprocess_spectra(data_feb_march, "feb_march")
+
+# --- Combine ---
+df_combined <- bind_rows(df_feb_july, df_feb_march)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r}
+df_combined <- bind_rows(df_feb_july, df_feb_march)
+```
+
+```{r}
+
+# --- Load Libraries ---
+library(dplyr)
+library(tidyr)
+library(readr)
+library(stringr)
+library(purrr)
+library(reshape2)
+library(ggplot2)
+library(plotly)
+library(cowplot)
+library(RColorBrewer)
+library(hyperSpec)
+library(prospectr)
+library(signal)
+library(mdatools)
+library(mvoutlier)
+library(lightr)
+library(baseline)
+library(nnet)
+library(caret)
+library(zoo)
+
+# --- Preprocessing Function ---
+preprocess_spectra <- function(data, dataset_label) {
+
+  # Step 1: Standardize format
+  data <- data %>%
+    mutate(rep = "a") %>%
+    select(1:2, rep, everything())
+
+  colnames(data) <- sub("^X", "", colnames(data))
+  data <- na.omit(data)
+
+  # Step 2: Filter seed numbers
+  data_individual <- data[as.numeric(data$seed_num) > 0 & as.numeric(data$seed_num) < 49, ]
+  data_individual$date <- gsub("\\.raw", "", data_individual$date)
+
+  # Step 3: Identify spectral columns
+  spectral_cols <- grep("^[0-9]+\\.[0-9]+$", names(data_individual), value = TRUE)
+
+  # Step 4: Baseline correction
+  spec_matrix <- data_individual %>% select(all_of(spectral_cols)) %>% as.matrix()
+  bl_result <- baseline.als(spec_matrix, lambda = 50, p = 0.1)
+  corrected_spec <- bl_result$corrected
+
+  data_corrected <- data_individual %>%
+    select(-all_of(spectral_cols)) %>%
+    bind_cols(as.data.frame(corrected_spec))
+
+  # Step 5: Re-identify spectral columns post-baseline
+  spectral_cols <- grep("^[0-9]+\\.[0-9]+$", names(data_corrected), value = TRUE)
+
+  # Step 6: Apply MSC
+  spec_matrix <- data_corrected %>% select(all_of(spectral_cols)) %>% as.matrix()
+  spec_msc <- msc(spec_matrix)
+  msc_df <- as.data.frame(spec_msc)
+  colnames(msc_df) <- spectral_cols
+
+  msc_df <- data_corrected %>%
+    select(-all_of(spectral_cols)) %>%
+    bind_cols(msc_df)
+
+  # Step 7: Convert to long format
+  df_long <- msc_df %>%
+    pivot_longer(cols = all_of(spectral_cols), names_to = "wavelength", values_to = "MSC_Reflectance") %>%
+    mutate(wavelength = as.numeric(wavelength))
+
+  # Step 8: Savitzky-Golay Smoothing
+  df_long <- df_long %>%
+    group_by(seed_num, timepoint, date, side, stage, genotype) %>%
+    arrange(wavelength) %>%
+    mutate(smoothed_msc_reflectance = sgolayfilt(MSC_Reflectance, p = 2, n = 11)) %>%
+    ungroup()
+
+  # Step 9: Normalize SG-smoothed MSC reflectance per individual spectrum over 450-1000 nm
+  df_long <- df_long %>%
+    dplyr::filter(wavelength > 450 & wavelength < 1000)
+
+  min_max_normalize <- function(x) (x - min(x)) / (max(x) - min(x))
+
+  df_long <- df_long %>%
+    mutate(dataset = dataset_label) %>%
+    group_by(dataset, seed_num, timepoint, date, side, stage, genotype) %>%
+    mutate(norm_smoothed_msc = min_max_normalize(smoothed_msc_reflectance)) %>%
+    ungroup()
+
+  return(df_long)
+}
+
+# --- Load Data ---
+data_feb_july <- read.csv("/Users/propst/Desktop/kp_barley_project_folders/feb_july_data.csv")
+data_feb_march <- read.csv("/Users/propst/Desktop/using/seed_spectral_data.csv")
+
+# --- Apply Preprocessing ---
+df_feb_july <- preprocess_spectra(data_feb_july, "feb_july")
+df_feb_march <- preprocess_spectra(data_feb_march, "feb_march")
+
+# --- Combine Datasets ---
+df_combined <- bind_rows(df_feb_july, df_feb_march)
+
+# --- Filter Timepoint ---
+df_combined_filtered <- df_combined %>%
+  dplyr::filter(timepoint == 0)
+
+# --- Plot ---
+df_longer <- df_combined_filtered %>%
+  pivot_longer(cols = c("MSC_Reflectance", "smoothed_msc_reflectance", "norm_smoothed_msc"),
+               names_to = "processing", values_to = "intensity")
+
+ggplot(df_longer, aes(x = wavelength, y = intensity, color = processing)) +
+  geom_line(alpha = 0.8) +
+  facet_wrap(~ dataset) +
+  labs(
+    title = "Raw vs MSC vs Normalized SG-smoothed Reflectance",
+    x = "Wavelength (nm)",
+    y = "Reflectance / Scaled Intensity",
+    color = "Processing Type"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+# --- Plot Normalized Spectra ---
+ggplot(df_combined_filtered, aes(x = wavelength, y = norm_reflectance, color = dataset)) +
+  geom_line(alpha = 0.5) +
+  facet_wrap(~ timepoint) +
+  labs(
+    title = "Comparison of Normalized First Derivative Reflectance",
+    x = "Wavelength (nm)",
+    y = "Normalized First Derivative Reflectance"
+  ) +
+  theme_minimal()
+
+```
+## 2. Mean ± SD Spectral Profiles
+```{r mean-sd-plot}
+df_summary <- df_combined_filtered %>%
+  group_by(dataset, wavelength) %>%
+  summarise(
+    mean_reflectance = mean(norm_smoothed_msc, na.rm = TRUE),
+    sd_reflectance = sd(norm_smoothed_msc, na.rm = TRUE)
+  )
+
+# Plot
+ggplot(df_summary, aes(x = wavelength, y = mean_reflectance, color = dataset)) +
+  geom_line(size=1) +
+  geom_ribbon(aes(ymin = mean_reflectance - sd_reflectance, ymax = mean_reflectance + sd_reflectance, fill=dataset), alpha=0.2, color=NA) +
+  theme_minimal() +
+  labs(title="Mean ± SD of Normalized Spectra", 
+       y="Normalized Reflectance", x="Wavelength (nm)")
+```
+
+# --- PCA Analysis with Wavelength Harmonization and Robust Duplicate Handling ---
+
+## Step 0: Harmonize wavelengths by rounding BEFORE combining datasets
+```{r wavelength-alignment}
+# Round wavelengths to the nearest whole number to ensure common grids
+df_feb_july <- df_feb_july %>% mutate(wavelength = round(wavelength))
+df_feb_march <- df_feb_march %>% mutate(wavelength = round(wavelength))
+
+# Identify common wavelengths
+common_wavelengths <- intersect(
+  df_feb_july$wavelength %>% unique(),
+  df_feb_march$wavelength %>% unique()
+)
+
+# Filter to common wavelengths
+df_feb_july <- df_feb_july %>% dplyr::filter(wavelength %in% common_wavelengths)
+df_feb_march <- df_feb_march %>% dplyr::filter(wavelength %in% common_wavelengths)
+
+# Re-combine after alignment
+df_combined_filtered <- bind_rows(df_feb_july, df_feb_march)
+```
+
+## Step 1: Resolve duplicated measurements by averaging
+```{r duplicate-resolution}
+df_prepped <- df_combined_filtered %>%
+  group_by(seed_num, dataset, timepoint, rep, side, date, wavelength) %>%
+  summarise(norm_smoothed_msc = mean(norm_smoothed_msc, na.rm=TRUE)) %>%
+  ungroup()
+```
+
+## Step 2: Pivot Wider safely
+```{r pivot-safely}
+pca_data <- df_prepped %>%
+  pivot_wider(names_from = wavelength, values_from = norm_smoothed_msc)
+```
+
+## Step 3: Identify spectral columns
+```{r spectral-columns}
+spectral_cols <- grep("^[0-9]+", names(pca_data), value=TRUE)
+```
+
+## Step 4: Remove rows with incomplete spectra
+```{r clean-incomplete}
+pca_data_clean <- pca_data %>%
+  dplyr::filter(if_all(all_of(spectral_cols), ~ !is.na(.) & is.finite(.)))
+```
+
+## Step 5: PCA computation
+```{r pca-final}
+pca_res <- prcomp(pca_data_clean %>% select(all_of(spectral_cols)), scale. = TRUE)
+```
+
+## Step 6: Scree Plot
+```{r scree-plot}
+ggplot(data.frame(
+  PC = 1:length(pca_res$sdev),
+  Variance = (pca_res$sdev)^2 / sum(pca_res$sdev^2)
+), aes(x = PC, y = Variance)) +
+  geom_line() + geom_point() +
+  labs(title = "Scree Plot", x = "Principal Component", y = "Proportion of Variance Explained") +
+  theme_minimal()
+```
+
+## Step 7: PCA Scores Plot
+```{r pca-plot}
+library(ggfortify)
+
+autoplot(pca_res, data = pca_data_clean, colour = 'dataset') +
+  theme_minimal() +
+  ggtitle("PCA of Spectral Data (Normalized First Derivative)")
+```
+
+## Step 8: Export PCA scores
+```{r export-pca}
+pca_scores <- as.data.frame(pca_res$x)
+pca_scores$dataset <- pca_data_clean$dataset
+write.csv(pca_scores, "pca_scores.csv", row.names=FALSE)
+```
+## Step 7: PCA Scores Plot
+```{r pca-plot}
+autoplot(pca_res, data = pca_data_clean, colour = 'dataset') +
+  theme_minimal() +
+  ggtitle("PCA of Spectral Data (Normalized First Derivative)")
+
+#Comparison between 2 PC show high variability between the 2 experiments
+```
+
+## Step 8: Export PCA scores
+```{r export-pca}
+pca_scores <- as.data.frame(pca_res$x)
+pca_scores$dataset <- pca_data_clean$dataset
+write.csv(pca_scores, "pca_scores.csv", row.names=FALSE)
+```
+## 4. PERMANOVA Test
+```{r permanova}
+library(vegan)
+dist_mat <- dist(pca_data %>% select(-seed_num, -dataset))
+adonis_res <- adonis2(dist_mat ~ dataset, data = pca_data)
+print(adonis_res)
+
+#permANOVA shows high significance that the experiments differ from one another after 999 permutatioins of the data
+```
+
+## 5. Hotelling's T² Test
+```{r hotellings-t2}
+library(Hotelling)
+
+# Compute Hotelling's T2 using PCA scores instead
+scores <- as.data.frame(pca_res$x)  # PCA scores
+
+group1 <- scores %>% dplyr::filter(pca_data_clean$dataset == "feb_july") %>% select(PC1:PC5)
+group2 <- scores %>% dplyr::filter(pca_data_clean$dataset == "feb_march") %>% select(PC1:PC5)
+
+k<-hotelling.test(group1, group2)
+k
+# Results show high variability between the first five components of the experiments
+```
+
+## 6. ANOVA at each wavelength with Bonferroni correction
+```{r anova-bonferroni}
+library(broom)
+anova_results <- df_combined_filtered %>%
+  group_by(wavelength) %>%
+  do(tidy(aov(norm_smoothed_msc ~ dataset, data = .))) %>%
+  dplyr::filter(term == "dataset") %>%
+  ungroup()
+
+# Bonferroni Correction
+anova_results <- anova_results %>%
+  mutate(p_adj = p.adjust(p.value, method = "bonferroni"))
+
+# Plot p-values
+ggplot(anova_results, aes(x=wavelength, y=-log10(p_adj))) +
+  geom_line() +
+  geom_hline(yintercept=-log10(0.05), linetype="dashed", color="red") +
+  theme_minimal() +
+  labs(title="ANOVA p-values with Bonferroni Correction", y="-log10(p adj)", x="Wavelength")
+
+# High level of variability at every wavelength between experiments
+```
+
+## 7. Interpretation
+- **Mean ± SD**: Reveals visible trends or offsets.
+- **PCA**: Shows clustering patterns.
+- **PERMANOVA**: Tests for overall dataset differences.
+- **Hotelling's T²**: Tests multivariate differences.
+- **ANOVA with Bonferroni**: Identifies specific wavelengths with significant differences.
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

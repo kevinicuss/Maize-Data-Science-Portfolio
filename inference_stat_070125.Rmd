@@ -1,0 +1,197 @@
+---
+title: "Inferential_stats_06212025"
+author: "Kevin"
+date: "2025-06-22"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+#Libraries
+
+library("htmlwidgets")
+
+library("DT")
+
+library("shiny")
+
+library("tidyverse") # a set of packages for data manipulation and visualization, including ggplot2.
+
+library("hrbrthemes") # provides additional themes and color palettes for ggplot2.
+
+library("viridis") #a color palette designed to be visually appealing and perceptually uniform.
+
+library("ggplot2") #  a popular plotting package for creating complex and aesthetically pleasing visualizations.
+
+library("ggThemeAssist") # a package that provides a graphical user interface for customizing ggplot2 themes.
+
+library("broom") #  a package for tidying statistical models and extracting useful information from them.
+
+library("ggfortify") # extends ggplot2 with methods for visualizing various statistical models.
+
+library("ggforce") #  a package that extends ggplot2 with additional geometries and scales.
+
+library("magrittr") # a package for creating more readable and efficient code by using the pipe operator %>%
+
+library("car") # a package for statistical analysis and visualization of regression models.
+
+library("GGally") # provides additional tools for exploring multivariate data using ggplot2.
+
+library("pheatmap") # a package for creating heatmaps and clustering dendrograms.
+```
+
+
+```{r}
+############
+#Full Raw Data
+data_clean <-read_csv("~/Desktop/data_clean_Mahalanobis.csv")
+
+head(data_clean)
+###############
+```
+
+```{r}
+
+# Load libraries
+library(ggfortify)
+library(gridExtra)
+library(ggplot2)
+
+# Fit model
+model_height <- lm(log(height) ~ treatment * genotype, data = data_clean)
+
+# Create diagnostic plots using autoplot
+autoplot_obj <- autoplot(model_height)
+
+# Manually extract the plots (it's an S4 object with a 'plots' slot)
+plot_list <- autoplot_obj@plots
+
+# Apply consistent theme to each plot
+plot_list <- lapply(plot_list, function(p) p + theme_minimal())
+
+# Arrange plots into grid layout
+combined_plot <- grid.arrange(grobs = plot_list, ncol = 2,
+                              top = "Diagnostic Plots for log(Height) ~ Treatment × Genotype")
+
+# Save to file
+ggsave(filename = "~/Desktop/diagnostic_plot_log_height_model.png",
+       plot = combined_plot,
+       width = 10, height = 6, dpi = 300)
+
+
+```
+```{r}
+
+# Load necessary library
+library(ggfortify)
+
+# Select physical traits
+trait_matrix <- data_clean[, c("height", "width", "area", "convex_hull_area", "solidity", "perimeter", "hue_circular_mean")]
+
+# Optional: scale data
+trait_matrix_scaled <- scale(trait_matrix)
+
+# Run PCA
+pca_result <- prcomp(trait_matrix_scaled)
+
+# Scree plot
+plot(pca_result, type = "lines", main = "Scree Plot of PCA for Maize Morphological Traits")
+
+# Biplot
+#pca_biplot<-autoplot(pca_result, data = data_clean, colour = 'treatment', loadings = TRUE, loadings.label = TRUE)
+
+# Biplot with larger, more readable text
+# Recreate the biplot with repelling labels
+pca_biplot <- autoplot(
+  pca_result,
+  data = data_clean,
+  colour = 'treatment',
+  loadings = TRUE,
+  loadings.label = TRUE,
+  loadings.label.repel = TRUE,  # Prevent overlap
+  loadings.label.size = 5
+) +
+  ggtitle("PCA Biplot of Physical Traits") +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12)
+  )
+
+
+ggsave(filename = "~/Desktop/pca_biplot.png", 
+       plot = pca_biplot, 
+       width = 10, height = 10, dpi = 300)
+
+```
+```{r}
+library(pls)
+
+# Encode treatment numerically if needed
+data_clean$treatment_num <- as.numeric(as.factor(data_clean$treatment))
+
+# Run PLS regression
+pls_model <- plsr(treatment_num ~ height + width + area + convex_hull_area +
+                  solidity + perimeter + hue_circular_mean,
+                  data = data_clean, scale = TRUE, validation = "CV")
+
+# Summary and variable importance
+summary(pls_model)
+loadingplot(pls_model, comps = 1:2)
+title(main = "PLS Loadings Plot (Components 1 & 2): Contribution of Physical Traits")
+
+```
+
+```{r}
+# Define response matrix
+response_matrix <- cbind(
+  area = data_clean$area,
+  convex_hull_area = data_clean$convex_hull_area,
+  solidity = data_clean$solidity,
+  perimeter = data_clean$perimeter,
+  hue_circular_mean = data_clean$hue_circular_mean
+)
+
+# Fit MANOVA model
+manova_model <- manova(response_matrix ~ treatment * genotype, data = data_clean)
+
+# Summary of MANOVA using Pillai's trace
+summary(manova_model, test = "Pillai")
+
+```
+```{r}
+# Load necessary library
+library(MASS)
+
+# Subset and scale relevant traits
+trait_matrix <- data_clean[, c("height", "width", "area", "convex_hull_area",
+                               "solidity", "perimeter", "hue_circular_mean")]
+trait_matrix_scaled <- scale(trait_matrix)
+
+# Canonical Discriminant Analysis using lda from MASS
+cda_model <- lda(treatment ~ ., data = data.frame(trait_matrix_scaled, treatment = data_clean$treatment))
+
+# View model results
+print(cda_model)
+
+# Project data into canonical space
+cda_values <- predict(cda_model)
+
+# Combine with metadata for plotting
+cda_df <- data.frame(cda_values$x, Treatment = data_clean$treatment)
+
+# Visualize CDA results
+library(ggplot2)
+ggplot(cda_df, aes(x = LD1, y = LD2, color = Treatment)) +
+  geom_point(alpha = 0.6, size = 2) +
+  stat_ellipse(type = "norm", level = 0.68, linetype = "dashed") +
+  labs(title = "Canonical Discriminant Analysis (CDA) of Physical Traits by Treatment",
+       x = "Canonical Discriminant 1 (LD1)",
+       y = "Canonical Discriminant 2 (LD2)") +
+  theme_minimal() +
+  theme(text = element_text(size = 14))
+
+```
